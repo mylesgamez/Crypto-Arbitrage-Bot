@@ -18,7 +18,8 @@ coinbasepro = ccxt.coinbasepro({
 # Add credentials for other exchanges similarly
 
 # Define the trading pairs
-symbols = ['BTC/USDT', 'ADA/USDT', 'ETH/USDT', 'DOGE/USDT']
+symbols = ['BTC/USDT', 'ADA/USDT', 'ETH/USDT',
+           'DOGE/USDT', 'LTC/USDT', 'XRP/USDT']
 
 # Define your trading parameters
 trade_amount = 0.1  # The amount to trade in the base currency
