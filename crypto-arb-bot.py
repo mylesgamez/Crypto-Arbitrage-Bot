@@ -1,41 +1,50 @@
 import ccxt
 import time
 import logging
+import os
 
 # Initialize the logging system
 logging.basicConfig(filename='arb_bot.log', level=logging.INFO,
                     format='%(asctime)s - %(levelname)s - %(message)s')
 
-# Initialize exchanges and provide your API keys and secrets
-binance = ccxt.binance({
-    'apiKey': 'YOUR_BINANCE_API_KEY',
-    'secret': 'YOUR_BINANCE_API_SECRET',
-})
-coinbasepro = ccxt.coinbasepro({
-    'apiKey': 'YOUR_COINBASE_PRO_API_KEY',
-    'secret': 'YOUR_COINBASE_PRO_API_SECRET',
-})
-# Add credentials for other exchanges similarly
+# 1. Configurations and Secrets
+API_KEYS = {
+    "binance": {
+        "apiKey": os.environ["BINANCE_API_KEY"],
+        "secret": os.environ["BINANCE_API_SECRET"]
+    },
+    "coinbasepro": {
+        "apiKey": os.environ["COINBASE_PRO_API_KEY"],
+        "secret": os.environ["COINBASE_PRO_API_SECRET"]
+    }
+}
+
+# 2. Dynamic Exchange Initialization
+exchanges = {}
+for exchange_name, credentials in API_KEYS.items():
+    exchanges[exchange_name] = getattr(ccxt, exchange_name)(credentials)
 
 # Define the trading pairs
 symbols = ['BTC/USDT', 'ADA/USDT', 'ETH/USDT',
            'DOGE/USDT', 'LTC/USDT', 'XRP/USDT']
 
 # Define your trading parameters
-trade_amount = 0.1  # The amount to trade in the base currency
-profit_threshold = 0.5  # Minimum profit percentage to execute a trade
-trailing_stop_percentage = 2.0  # Trailing stop percentage
+trade_amount = 0.1
+profit_threshold = 0.5
+trailing_stop_percentage = 2.0
 
-# Initialize a dictionary to store the highest price for each symbol
 highest_prices = {symbol: None for symbol in symbols}
-
-# Initialize dictionaries to keep track of orders and their status
 buy_orders = {}
 sell_orders = {}
 
-# Define circuit breaker parameters
 max_errors = 5
 error_count = 0
+
+# Placeholder for trading fees (in percentage)
+TRADING_FEES = {
+    'binance': 0.1,       # assuming 0.1% fee for Binance
+    'coinbasepro': 0.25   # assuming 0.25% fee for Coinbase Pro
+}
 
 
 def log_info(message):
@@ -48,7 +57,7 @@ def log_error(message):
     error_count += 1
     if error_count >= max_errors:
         log_info("Circuit breaker triggered. Halting trading.")
-        time.sleep(3600)  # Sleep for an hour as a circuit breaker
+        time.sleep(3600)
     logging.error(message)
     print(f"ERROR: {message}")
 
@@ -60,15 +69,13 @@ def reset_circuit_breaker():
 
 def get_prices(exchanges, symbols):
     prices = {}
-    for exchange in exchanges:
+    for exchange in exchanges.values():
         for symbol in symbols:
             try:
                 ticker = exchange.fetch_ticker(symbol)
                 prices[f"{exchange.id} - {symbol}"] = ticker['last']
             except Exception as e:
-                error_message = f"Error fetching data from {exchange.id}: {str(e)}"
-                log_error(error_message)
-                print(error_message)
+                log_error(f"Error fetching data from {exchange.id}: {str(e)}")
 
     return prices
 
@@ -80,6 +87,20 @@ def update_trailing_stop(symbol, current_price):
             highest_prices[symbol] = current_price
     else:
         highest_prices[symbol] = current_price
+
+
+def calculate_profit(base_price, comp_price, buy_exchange_name, sell_exchange_name):
+    """Calculate profit after considering trading fees."""
+    buy_fee = TRADING_FEES[buy_exchange_name] / 100
+    sell_fee = TRADING_FEES[sell_exchange_name] / 100
+
+    effective_buy_price = comp_price * (1 + buy_fee)
+    effective_sell_price = base_price * (1 - sell_fee)
+
+    profit_percentage = (
+        (effective_sell_price - effective_buy_price) / effective_buy_price) * 100
+
+    return profit_percentage
 
 
 def execute_trade(buy_exchange, sell_exchange, symbol, amount, trailing_stop_percentage):
@@ -123,38 +144,37 @@ def execute_trade(buy_exchange, sell_exchange, symbol, amount, trailing_stop_per
 while True:
     try:
         reset_circuit_breaker()
-        # Choose exchanges for price comparison
-        prices = get_prices([binance, coinbasepro], symbols)
+        prices = get_prices(exchanges, symbols)
         log_info(prices)
 
         for symbol in symbols:
-            base_symbol, quote_symbol = symbol.split('/')
-            # Example: use Binance's prices as reference
-            base_price = prices[f"binance - {symbol}"]
+            for ref_exchange_name, ref_exchange in exchanges.items():
+                base_price = prices.get(f"{ref_exchange_name} - {symbol}")
+                if not base_price:
+                    continue
 
-            # Look for arbitrage opportunities
-            for exchange in [coinbasepro]:
-                if exchange.id == 'binance':
-                    continue  # Skip the reference exchange
-                if f"{exchange.id} - {symbol}" not in prices:
-                    continue  # Skip if data is missing
+                for comp_exchange_name, comp_exchange in exchanges.items():
+                    if comp_exchange_name == ref_exchange_name:
+                        continue
 
-                exchange_price = prices[f"{exchange.id} - {symbol}"]
-                profit_percentage = (
-                    (base_price - exchange_price) / exchange_price) * 100
+                    comp_price = prices.get(f"{comp_exchange_name} - {symbol}")
+                    if not comp_price:
+                        continue
 
-                if profit_percentage >= profit_threshold:
-                    log_info(
-                        f"Profit opportunity found on {exchange.id} for {symbol} ({profit_percentage}%).")
+                    profit_percentage = calculate_profit(
+                        base_price, comp_price, comp_exchange_name, ref_exchange_name)
 
-                    # Execute the trade here (e.g., buy on Binance, sell on Coinbase Pro)
-                    buy_price = exchange_price  # Set the buy price to the current exchange price
-                    execute_trade(binance, exchange, symbol,
-                                  trade_amount, trailing_stop_percentage)
+                    if profit_percentage >= profit_threshold:
+                        log_info(
+                            f"Profit opportunity found on {comp_exchange_name} for {symbol} ({profit_percentage}%).")
+
+                        buy_exchange, sell_exchange = (
+                            comp_exchange, ref_exchange) if base_price > comp_price else (ref_exchange, comp_exchange)
+
+                        execute_trade(buy_exchange, sell_exchange, symbol, trade_amount,
+                                      trailing_stop_percentage, comp_price, base_price)
 
     except Exception as e:
-        error_message = f"Error: {str(e)}"
-        log_error(error_message)
+        log_error(f"Error: {str(e)}")
 
-    # You may want to introduce a delay to avoid making too many API requests
     time.sleep(5)
